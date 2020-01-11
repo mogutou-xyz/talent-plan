@@ -112,7 +112,54 @@ func (c *MRCluster) worker() {
 				// hint: don't encode results returned by ReduceF, and just output
 				// them into the destination file directly so that users can get
 				// results formatted as what they want.
-				panic("YOUR CODE HERE")
+
+				var kvs []KeyValue
+				for i := 0; i < t.nMap; i++ {
+					rPath := reduceName(t.dataDir, t.jobName, i, t.taskNumber)
+					file, err := os.Open(rPath)
+					if nil != err {
+						panic(err)
+					}
+					dec := json.NewDecoder(file)
+					for {
+						var kv KeyValue
+						err := dec.Decode(&kv)
+						if err != nil {
+							break
+						}
+						kvs = append(kvs, kv)
+					}
+					if err := file.Close(); err != nil {
+						panic(err)
+					}
+				}
+
+				// 将相同的 key 的写入文件
+				reduceFile, err := os.Create(mergeName(t.dataDir, t.jobName, t.taskNumber))
+				if nil != err {
+					panic(err)
+				}
+
+				outKVs := make(map[string][]string)
+				for _, v := range kvs {
+					out, ok := outKVs[v.Key]
+					if ok {
+						outKVs[v.Key] = append(out, v.Value)
+					} else {
+						outKVs[v.Key] = []string{v.Value}
+					}
+				}
+
+				for k, v := range outKVs {
+					output := t.reduceF(k, v)
+					if _, err := reduceFile.WriteString(output); err != nil {
+						panic(err)
+					}
+				}
+				if err := reduceFile.Close(); err != nil {
+					panic(err)
+				}
+
 			}
 			t.wg.Done()
 		case <-c.exit:
@@ -159,7 +206,29 @@ func (c *MRCluster) run(jobName, dataDir string, mapF MapF, reduceF ReduceF, map
 
 	// reduce phase
 	// YOUR CODE HERE :D
-	panic("YOUR CODE HERE")
+	// 等所有 map task 执行完成后再执行 reduce task
+	rTasks := make([]*task, 0, nReduce)
+	var notifyFiles []string
+	for i := 0; i < nReduce; i++ {
+		t := &task{
+			dataDir:    dataDir,
+			jobName:    jobName,
+			phase:      reducePhase,
+			taskNumber: i,
+			nReduce:    nReduce,
+			nMap:       nMap,
+			reduceF:    reduceF,
+		}
+		t.wg.Add(1)
+		rTasks = append(rTasks, t)
+		go func() { c.taskCh <- t }()
+		notifyFiles = append(notifyFiles, mergeName(dataDir, jobName, i))
+	}
+	for _, t := range rTasks {
+		t.wg.Wait()
+	}
+
+	notify <- notifyFiles
 }
 
 func ihash(s string) int {
